@@ -62,6 +62,9 @@ jobs:
       - name: Mypy
         run: mypy app
 
+      - name: Apply database migrations
+        run: alembic upgrade head
+
       - name: Pytest with coverage gate
         # TODO: 80 is the current floor (tenant-isolation suite lands at 99%);
         # raise further as more service/API/worker code lands with tests.
