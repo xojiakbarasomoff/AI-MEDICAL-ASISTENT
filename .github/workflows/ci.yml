@@ -63,5 +63,6 @@ jobs:
         run: mypy app
 
       - name: Pytest with coverage gate
-        # TODO: raise coverage gate as real code and tests land (target 70%)
-        run: pytest --cov=app --cov-report=term-missing --cov-fail-under=0
+        # TODO: 80 is the current floor (tenant-isolation suite lands at 99%);
+        # raise further as more service/API/worker code lands with tests.
+        run: pytest --cov=app --cov-report=term-missing --cov-fail-under=80
