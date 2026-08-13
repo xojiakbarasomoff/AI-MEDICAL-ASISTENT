@@ -15,6 +15,7 @@ env/
 
 # Environment variables
 .env
+.env.docker
 
 # Testing / coverage
 .pytest_cache/

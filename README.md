@@ -39,10 +39,14 @@ Bring up the full stack (api, worker, postgres with pgvector, redis):
 make up
 ```
 
-This uses `.env` for configuration — for Docker Compose specifically, copy
-`.env.docker.example` to `.env` instead of `.env.example`, since the
-`DATABASE_URL`/`REDIS_URL` values need to point at the `postgres`/`redis`
-service names rather than `localhost`.
+Docker Compose reads its own env file, `.env.docker` (copy it from
+`.env.docker.example`) — separate from the `.env` you set up above, since
+containers need `DATABASE_URL`/`REDIS_URL` to point at the `postgres`/`redis`
+service names rather than `localhost`:
+
+```bash
+cp .env.docker.example .env.docker
+```
 
 Check the API is up:
 
