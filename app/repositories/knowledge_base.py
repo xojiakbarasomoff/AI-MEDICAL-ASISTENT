@@ -1,8 +1,29 @@
+from dataclasses import dataclass
 from typing import Any
+
+from sqlalchemy import select
 
 from app.core.tenant_context import get_current_tenant
 from app.models.knowledge_base import KnowledgeBase
 from app.repositories.base import CrossTenantAccessError, TenantScopedRepository
+
+
+@dataclass(frozen=True)
+class KnowledgeBaseMatch:
+    """One search() hit: the row plus how far its embedding is from the
+    query, in the metric pgvector's `<=>` operator computes.
+    """
+
+    knowledge_base: KnowledgeBase
+    distance: float
+
+    @property
+    def score(self) -> float:
+        """Cosine similarity (1.0 = identical direction, 0.0 = orthogonal),
+        derived from distance since pgvector's cosine_distance is
+        1 - cosine_similarity.
+        """
+        return 1.0 - self.distance
 
 
 class KnowledgeBaseRepository(TenantScopedRepository[KnowledgeBase]):
@@ -34,3 +55,28 @@ class KnowledgeBaseRepository(TenantScopedRepository[KnowledgeBase]):
             setattr(obj, field, value)
         await self.session.flush()
         return obj
+
+    async def search(
+        self, query_embedding: list[float], limit: int = 5
+    ) -> list[KnowledgeBaseMatch]:
+        """Tenant-scoped semantic search over active FAQs, closest first.
+
+        Ranks by pgvector cosine distance (the `<=>` operator, exposed here
+        via Vector.cosine_distance()) between each row's embedding and
+        query_embedding — the ordering and the LIMIT both happen in SQL, so
+        Postgres does the ranking rather than pulling every row into Python.
+        Inactive rows and rows outside the current tenant are excluded from
+        the query entirely, not filtered after the fact.
+        """
+        distance = KnowledgeBase.embedding.cosine_distance(query_embedding).label("distance")
+        stmt = (
+            select(KnowledgeBase, distance)
+            .where(
+                KnowledgeBase.tenant_id == get_current_tenant(),
+                KnowledgeBase.is_active.is_(True),
+            )
+            .order_by(distance)
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return [KnowledgeBaseMatch(knowledge_base=kb, distance=dist) for kb, dist in result.all()]
