@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.tenant_context import TenantContextError, get_current_tenant
 from app.models.message import Message
+from app.rag.embeddings import EMBEDDING_DIMENSIONS
 from app.repositories.appointment import AppointmentRepository
 from app.repositories.base import (
     CrossTenantAccessError,
@@ -37,7 +38,11 @@ def _new_conversation_kwargs(seed: Seed) -> dict[str, Any]:
 
 
 def _new_knowledge_base_kwargs(seed: Seed) -> dict[str, Any]:
-    return {"question": "New question?", "answer": "New answer.", "embedding": [0.0] * 1536}
+    return {
+        "question": "New question?",
+        "answer": "New answer.",
+        "embedding": [0.0] * EMBEDDING_DIMENSIONS,
+    }
 
 
 def _new_operator_kwargs(seed: Seed) -> dict[str, Any]:

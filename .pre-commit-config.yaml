@@ -23,4 +23,5 @@ repos:
           - sqlalchemy>=2.0
           - pgvector>=0.3
           - openai>=1.50
+          - google-genai>=1.0
           - arq>=0.26

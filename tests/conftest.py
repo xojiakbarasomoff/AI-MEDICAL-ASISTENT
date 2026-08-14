@@ -19,6 +19,7 @@ from app.models.message import Message
 from app.models.operator import Operator
 from app.models.tenant import Tenant
 from app.models.user import User
+from app.rag.embeddings import EMBEDDING_DIMENSIONS
 from app.repositories.appointment import AppointmentRepository
 from app.repositories.channel import ChannelRepository
 from app.repositories.conversation import ConversationRepository
@@ -130,7 +131,7 @@ async def seed(
             knowledge_base = await KnowledgeBaseRepository(db_session).create(
                 question="What are your hours?",
                 answer="9 to 5.",
-                embedding=[0.0] * 1536,
+                embedding=[0.0] * EMBEDDING_DIMENSIONS,
             )
             operator = await OperatorRepository(db_session).create(
                 name="Dr. Smith", role="dentist", credentials="secret"

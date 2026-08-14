@@ -12,8 +12,8 @@ from tests.conftest import Seed
 
 
 def _direction(*nonzero: tuple[int, float]) -> list[float]:
-    """A 1536-dim vector with the given (index, value) pairs set and every
-    other component zero. Cosine distance depends only on angle, not
+    """An EMBEDDING_DIMENSIONS-dim vector with the given (index, value) pairs
+    set and every other component zero. Cosine distance depends only on angle, not
     magnitude, so putting all the "signal" in a couple of fixed dimensions
     gives exact, easy-to-reason-about distances between test vectors instead
     of relying on real (unpredictable) embeddings.

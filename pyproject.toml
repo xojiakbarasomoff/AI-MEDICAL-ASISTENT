@@ -13,6 +13,7 @@ dependencies = [
     "redis>=5.0",
     "arq>=0.26",
     "openai>=1.50",
+    "google-genai>=1.0",
     "pydantic>=2.9",
     "pydantic-settings>=2.5",
 ]
