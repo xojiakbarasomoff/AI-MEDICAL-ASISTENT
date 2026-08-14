@@ -14,6 +14,7 @@ from app.core.tenant_context import reset_current_tenant, set_current_tenant
 from app.rag.embeddings import EmbeddingProvider
 from app.rag.llm import LLMProvider
 from app.services.answer import generate_answer
+from app.services.debounce import join_messages, pop_batch_if_current_generation
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,48 @@ async def process_inbound_message(
     # logging it.
 
 
+async def fire_debounce_window(
+    ctx: dict[str, Any],
+    tenant_id: str,
+    sender_igsid: str,
+    generation: int,
+    *,
+    session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]] = db_session,
+    embedding_provider: EmbeddingProvider | None = None,
+    llm_provider: LLMProvider | None = None,
+) -> None:
+    """ARQ job: fires once a user's debounce window has elapsed with no
+    further messages. Scheduled (deferred) by
+    app.services.debounce.handle_inbound_message for every non-emergency
+    message; most scheduled calls for a burst of messages from the same
+    user are stale by the time they run (a later message reset the window)
+    and no-op here via pop_batch_if_current_generation — only the last one
+    scheduled for the current generation actually claims and processes the
+    batch.
+
+    Uses ctx["redis"] (the worker's own pool, set by arq itself) rather than
+    a second cached pool, and hands the claimed batch to
+    process_inbound_message unchanged — same generate-and-log logic,
+    whether it's answering one message or a joined batch of several.
+    """
+    pool = ctx["redis"]
+    messages = await pop_batch_if_current_generation(
+        pool, uuid.UUID(tenant_id), sender_igsid, generation
+    )
+    if not messages:
+        return
+
+    await process_inbound_message(
+        ctx,
+        tenant_id,
+        sender_igsid,
+        join_messages(messages),
+        session_factory=session_factory,
+        embedding_provider=embedding_provider,
+        llm_provider=llm_provider,
+    )
+
+
 class WorkerSettings:
-    functions = [process_inbound_message]
+    functions = [process_inbound_message, fire_debounce_window]
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)

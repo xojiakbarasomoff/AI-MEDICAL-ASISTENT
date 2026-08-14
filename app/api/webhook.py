@@ -12,8 +12,8 @@ from app.core.db import get_db_session
 from app.core.queue import get_arq_pool
 from app.core.redaction import preview
 from app.core.tenant_context import reset_current_tenant, set_current_tenant
+from app.services.debounce import handle_inbound_message
 from app.services.tenant_resolution import resolve_tenant_for_ig_account
-from app.workers.tasks import process_inbound_message
 
 logger = logging.getLogger(__name__)
 
@@ -112,18 +112,13 @@ async def _handle_payload(session: AsyncSession, pool: ArqRedis, payload: Webhoo
                 )
 
                 # TODO(IGB-?): Meta can redeliver the same webhook payload
-                # (slow ack, transient error, etc), which would enqueue and
+                # (slow ack, transient error, etc), which would register and
                 # reply to the same message twice. No dedup yet — needs an
                 # idempotency key (the IG message id) checked before
-                # enqueueing. arq's enqueue_job(_job_id=...) can provide this
-                # for free (it no-ops if a job with that id is already
+                # registering. arq's enqueue_job(_job_id=...) can provide
+                # this for free (it no-ops if a job with that id is already
                 # queued/running) if the IG message id is used as _job_id.
-                await pool.enqueue_job(
-                    process_inbound_message.__name__,
-                    str(tenant_id),
-                    event.sender.id,
-                    event.message.text,
-                )
+                await handle_inbound_message(pool, tenant_id, event.sender.id, event.message.text)
         finally:
             reset_current_tenant(token)
 

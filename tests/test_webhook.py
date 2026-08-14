@@ -3,17 +3,18 @@ import hmac
 import json
 import logging
 from collections.abc import AsyncIterator, Iterator
-from typing import Any
 
 import httpx
 import pytest
+from arq.connections import ArqRedis
+from arq.jobs import Job
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.core.db import get_db_session
 from app.core.queue import get_arq_pool
 from app.main import app
-from app.workers.tasks import process_inbound_message
+from app.services.debounce import FIRE_DEBOUNCE_WINDOW_JOB
 from tests.conftest import Seed
 
 TEST_SETTINGS = Settings(
@@ -25,16 +26,6 @@ TEST_SETTINGS = Settings(
 )
 
 
-class FakeArqPool:
-    """Records every enqueue_job call instead of touching real Redis."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, tuple[Any, ...]]] = []
-
-    async def enqueue_job(self, function: str, *args: Any, **kwargs: Any) -> None:
-        self.calls.append((function, args))
-
-
 @pytest.fixture(autouse=True)
 def _override_settings() -> Iterator[None]:
     app.dependency_overrides[get_settings] = lambda: TEST_SETTINGS
@@ -43,26 +34,25 @@ def _override_settings() -> Iterator[None]:
 
 
 @pytest.fixture
-def arq_pool() -> FakeArqPool:
-    return FakeArqPool()
-
-
-@pytest.fixture
 async def client(
-    db_session: AsyncSession, arq_pool: FakeArqPool
+    db_session: AsyncSession, redis_pool: ArqRedis
 ) -> AsyncIterator[httpx.AsyncClient]:
     """An httpx.AsyncClient driving the app in-process over ASGI, sharing
     this test's event loop (and so its db_session) — unlike
     fastapi.testclient.TestClient, which runs the app on a separate thread
     with its own event loop and would break the asyncpg connection bound to
     db_session's loop.
+
+    Uses the real redis_pool fixture (dedicated test Redis DB) rather than a
+    mock: handle_inbound_message does real RPUSH/LRANGE/Lua-script work that
+    isn't meaningfully fakeable.
     """
 
     async def _get_db_session_override() -> AsyncSession:
         return db_session
 
-    async def _get_arq_pool_override() -> FakeArqPool:
-        return arq_pool
+    async def _get_arq_pool_override() -> ArqRedis:
+        return redis_pool
 
     app.dependency_overrides[get_db_session] = _get_db_session_override
     app.dependency_overrides[get_arq_pool] = _get_arq_pool_override
@@ -71,6 +61,11 @@ async def client(
         yield ac
     app.dependency_overrides.pop(get_db_session, None)
     app.dependency_overrides.pop(get_arq_pool, None)
+
+
+async def _queued_jobs(pool: ArqRedis) -> list[Job]:
+    job_ids = await pool.zrange("arq:queue", 0, -1)
+    return [Job(job_id.decode(), redis=pool, _queue_name="arq:queue") for job_id in job_ids]
 
 
 def _sign(body: bytes, secret: str) -> str:
@@ -153,7 +148,7 @@ async def test_receive_webhook_with_missing_signature_returns_403(
     assert response.status_code == 403
 
 
-# --- tenant resolution + echo filtering + enqueueing ---
+# --- tenant resolution + echo filtering + debounce registration ---
 
 
 def _messaging_payload(
@@ -184,7 +179,7 @@ def _messaging_payload(
 async def test_receive_webhook_skips_echo_event(
     client: httpx.AsyncClient,
     seed: Seed,
-    arq_pool: FakeArqPool,
+    redis_pool: ArqRedis,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     page_id = seed.a.channel.external_id
@@ -199,13 +194,13 @@ async def test_receive_webhook_skips_echo_event(
     assert response.status_code == 200
     assert "webhook_echo_skipped" in caplog.text
     assert "webhook_message_received" not in caplog.text
-    assert arq_pool.calls == []
+    assert await _queued_jobs(redis_pool) == []
 
 
 async def test_receive_webhook_skips_event_from_own_account_without_echo_flag(
     client: httpx.AsyncClient,
     seed: Seed,
-    arq_pool: FakeArqPool,
+    redis_pool: ArqRedis,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     page_id = seed.a.channel.external_id
@@ -219,13 +214,13 @@ async def test_receive_webhook_skips_event_from_own_account_without_echo_flag(
 
     assert response.status_code == 200
     assert "webhook_echo_skipped" in caplog.text
-    assert arq_pool.calls == []
+    assert await _queued_jobs(redis_pool) == []
 
 
 async def test_receive_webhook_processes_genuine_inbound_message(
     client: httpx.AsyncClient,
     seed: Seed,
-    arq_pool: FakeArqPool,
+    redis_pool: ArqRedis,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     page_id = seed.a.channel.external_id
@@ -249,16 +244,20 @@ async def test_receive_webhook_processes_genuine_inbound_message(
     assert record.message_preview == text  # type: ignore[attr-defined]
     assert "message_text" not in record.__dict__
 
-    # The webhook enqueues the job and returns 200 without generating the
-    # reply inline — no OpenAI call in the request path.
-    assert arq_pool.calls == [
-        (process_inbound_message.__name__, (str(seed.tenant_a.id), "user-1", text))
-    ]
+    # The webhook returns 200 without generating the reply inline (no
+    # OpenAI call in the request path) — it hands off to the debounce layer,
+    # which schedules a deferred fire_debounce_window job rather than
+    # calling process_inbound_message directly.
+    [job] = await _queued_jobs(redis_pool)
+    info = await job.info()
+    assert info is not None
+    assert info.function == FIRE_DEBOUNCE_WINDOW_JOB
+    assert info.args == (str(seed.tenant_a.id), "user-1", 1)
 
 
 async def test_receive_webhook_from_unknown_ig_account_is_skipped_and_logged(
     client: httpx.AsyncClient,
-    arq_pool: FakeArqPool,
+    redis_pool: ArqRedis,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     body = _messaging_payload(
@@ -274,13 +273,13 @@ async def test_receive_webhook_from_unknown_ig_account_is_skipped_and_logged(
     assert response.status_code == 200
     assert "webhook_unknown_ig_account" in caplog.text
     assert "webhook_message_received" not in caplog.text
-    assert arq_pool.calls == []
+    assert await _queued_jobs(redis_pool) == []
 
 
 async def test_receive_webhook_tenant_b_account_resolves_to_tenant_b_not_a(
     client: httpx.AsyncClient,
     seed: Seed,
-    arq_pool: FakeArqPool,
+    redis_pool: ArqRedis,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     page_id = seed.b.channel.external_id
@@ -297,15 +296,17 @@ async def test_receive_webhook_tenant_b_account_resolves_to_tenant_b_not_a(
     [record] = [r for r in caplog.records if r.message == "webhook_message_received"]
     assert record.tenant_id == str(seed.tenant_b.id)  # type: ignore[attr-defined]
     assert record.tenant_id != str(seed.tenant_a.id)  # type: ignore[attr-defined]
-    assert arq_pool.calls == [
-        (process_inbound_message.__name__, (str(seed.tenant_b.id), "user-1", text))
-    ]
+
+    [job] = await _queued_jobs(redis_pool)
+    info = await job.info()
+    assert info is not None
+    assert info.args == (str(seed.tenant_b.id), "user-1", 1)
 
 
 async def test_receive_webhook_attachment_only_message_is_skipped_and_not_enqueued(
     client: httpx.AsyncClient,
     seed: Seed,
-    arq_pool: FakeArqPool,
+    redis_pool: ArqRedis,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     page_id = seed.a.channel.external_id
@@ -320,4 +321,4 @@ async def test_receive_webhook_attachment_only_message_is_skipped_and_not_enqueu
     assert response.status_code == 200
     assert "webhook_attachment_only_skipped" in caplog.text
     assert "webhook_message_received" not in caplog.text
-    assert arq_pool.calls == []
+    assert await _queued_jobs(redis_pool) == []

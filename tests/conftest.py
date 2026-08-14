@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
+from arq.connections import ArqRedis
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -45,6 +46,26 @@ async def db_session() -> AsyncIterator[AsyncSession]:
             await session.close()
             await trans.rollback()
     await engine.dispose()
+
+
+# Dedicated Redis DB index for tests — never db 0 (dev/prod), so a blanket
+# flushdb() before/after each test can't ever touch real data.
+TEST_REDIS_URL = "redis://localhost:6379/15"
+
+
+@pytest.fixture
+async def redis_pool() -> AsyncIterator[ArqRedis]:
+    """A real ArqRedis pool against a dedicated test DB, flushed clean
+    before and after each test. Debounce logic relies on real Redis Lua
+    scripts and list/counter semantics that aren't meaningfully fakeable.
+    """
+    pool = ArqRedis.from_url(TEST_REDIS_URL)
+    await pool.flushdb()
+    try:
+        yield pool
+    finally:
+        await pool.flushdb()
+        await pool.aclose()
 
 
 @pytest.fixture

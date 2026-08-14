@@ -1,4 +1,5 @@
 import logging
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -14,17 +15,27 @@ class GuardrailCategory(StrEnum):
 
 
 _APOSTROPHE_CHARS = "'’‘ʻʼ`"
+_WHITESPACE_RE = re.compile(r"\s+")
 
 
 def _normalize(text: str) -> str:
-    """Lowercase and strip apostrophe-like characters, so Uzbek Latin words
-    like "og'riq" match regardless of which apostrophe variant (', ', `, ʻ)
-    the patient typed, or whether they typed one at all. Applied to both the
-    keyword lists (at classifier construction) and the incoming message, so
-    both sides are normalized the same way.
+    """Lowercase, strip apostrophe-like characters, and collapse whitespace
+    (including newlines) to single spaces.
+
+    Apostrophe-stripping is so Uzbek Latin words like "og'riq" match
+    regardless of which apostrophe variant (', ', `, ʻ) the patient typed,
+    or whether they typed one at all. Whitespace collapsing matters for the
+    debounce batching layer: buffered messages get joined with newlines
+    (app.services.debounce), so a phrase split across two message bubbles
+    ("chest" / "pain") must still read as "chest pain" here, not
+    "chest\\npain", or the emergency check run against the combined buffer
+    would miss it. Applied to both the keyword lists (at classifier
+    construction) and the incoming message, so both sides normalize the same
+    way.
     """
     lowered = text.lower()
-    return "".join(ch for ch in lowered if ch not in _APOSTROPHE_CHARS)
+    stripped = "".join(ch for ch in lowered if ch not in _APOSTROPHE_CHARS)
+    return _WHITESPACE_RE.sub(" ", stripped)
 
 
 # TODO(IGB-?): this is a global, English/Russian/Uzbek starter list, not a
