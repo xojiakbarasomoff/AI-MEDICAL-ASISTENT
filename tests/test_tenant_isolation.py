@@ -25,7 +25,7 @@ from tests.conftest import Seed
 
 
 def _new_channel_kwargs(seed: Seed) -> dict[str, Any]:
-    return {"type": "instagram", "credentials": "new-token"}
+    return {"type": "instagram", "credentials": "new-token", "external_id": "ig-new-channel"}
 
 
 def _new_user_kwargs(seed: Seed) -> dict[str, Any]:

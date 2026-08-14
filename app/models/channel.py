@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Boolean, ForeignKey, String, Text, text
+from sqlalchemy import Boolean, ForeignKey, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -9,6 +9,7 @@ from app.models.base import Base
 
 class Channel(Base):
     __tablename__ = "channels"
+    __table_args__ = (UniqueConstraint("type", "external_id", name="uq_channels_type_external_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
@@ -17,5 +18,13 @@ class Channel(Base):
         UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True
     )
     type: Mapped[str] = mapped_column(String(50), nullable=False)  # "telegram" | "instagram"
+    # The platform's own identifier for this account (IG page/account id,
+    # Telegram bot id, etc). This is what an inbound webhook gives us to
+    # figure out which tenant it belongs to — see
+    # app.services.tenant_resolution.resolve_tenant_for_ig_account(). Unique
+    # per type, not globally: different platforms have separate id
+    # namespaces, so two channels of different types could coincidentally
+    # share an id string.
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
     credentials: Mapped[str] = mapped_column(Text, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))

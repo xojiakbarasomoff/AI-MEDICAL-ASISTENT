@@ -98,7 +98,7 @@ async def seed(
     async def _build(tenant: Tenant) -> TenantSeed:
         with as_tenant(tenant.id):
             channel = await ChannelRepository(db_session).create(
-                type="instagram", credentials="token"
+                type="instagram", credentials="token", external_id=f"ig-{tenant.id}"
             )
             user = await UserRepository(db_session).create(
                 channel_id=channel.id, external_id=f"ext-{tenant.id}"

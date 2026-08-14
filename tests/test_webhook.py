@@ -2,13 +2,16 @@ import hashlib
 import hmac
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 
+import httpx
 import pytest
-from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
+from app.core.db import get_db_session
 from app.main import app
+from tests.conftest import Seed
 
 TEST_SETTINGS = Settings(
     database_url="postgresql+asyncpg://test:test@localhost/test",
@@ -27,8 +30,22 @@ def _override_settings() -> Iterator[None]:
 
 
 @pytest.fixture
-def client() -> TestClient:
-    return TestClient(app)
+async def client(db_session: AsyncSession) -> AsyncIterator[httpx.AsyncClient]:
+    """An httpx.AsyncClient driving the app in-process over ASGI, sharing
+    this test's event loop (and so its db_session) — unlike
+    fastapi.testclient.TestClient, which runs the app on a separate thread
+    with its own event loop and would break the asyncpg connection bound to
+    db_session's loop.
+    """
+
+    async def _get_db_session_override() -> AsyncSession:
+        return db_session
+
+    app.dependency_overrides[get_db_session] = _get_db_session_override
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        yield ac
+    app.dependency_overrides.pop(get_db_session, None)
 
 
 def _sign(body: bytes, secret: str) -> str:
@@ -39,8 +56,10 @@ def _sign(body: bytes, secret: str) -> str:
 # --- GET /webhook verification handshake ---
 
 
-def test_verify_webhook_with_valid_token_returns_challenge(client: TestClient) -> None:
-    response = client.get(
+async def test_verify_webhook_with_valid_token_returns_challenge(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.get(
         "/webhook",
         params={
             "hub.mode": "subscribe",
@@ -52,8 +71,8 @@ def test_verify_webhook_with_valid_token_returns_challenge(client: TestClient) -
     assert response.text == "12345"
 
 
-def test_verify_webhook_with_invalid_token_returns_403(client: TestClient) -> None:
-    response = client.get(
+async def test_verify_webhook_with_invalid_token_returns_403(client: httpx.AsyncClient) -> None:
+    response = await client.get(
         "/webhook",
         params={
             "hub.mode": "subscribe",
@@ -64,8 +83,8 @@ def test_verify_webhook_with_invalid_token_returns_403(client: TestClient) -> No
     assert response.status_code == 403
 
 
-def test_verify_webhook_with_wrong_mode_returns_403(client: TestClient) -> None:
-    response = client.get(
+async def test_verify_webhook_with_wrong_mode_returns_403(client: httpx.AsyncClient) -> None:
+    response = await client.get(
         "/webhook",
         params={
             "hub.mode": "unsubscribe",
@@ -79,41 +98,47 @@ def test_verify_webhook_with_wrong_mode_returns_403(client: TestClient) -> None:
 # --- POST /webhook signature validation ---
 
 
-def test_receive_webhook_with_valid_signature_returns_200(client: TestClient) -> None:
+async def test_receive_webhook_with_valid_signature_returns_200(client: httpx.AsyncClient) -> None:
     body = json.dumps({"object": "instagram", "entry": []}).encode("utf-8")
     signature = _sign(body, "test-app-secret")
 
-    response = client.post("/webhook", content=body, headers={"X-Hub-Signature-256": signature})
+    response = await client.post(
+        "/webhook", content=body, headers={"X-Hub-Signature-256": signature}
+    )
     assert response.status_code == 200
 
 
-def test_receive_webhook_with_invalid_signature_returns_403(client: TestClient) -> None:
+async def test_receive_webhook_with_invalid_signature_returns_403(
+    client: httpx.AsyncClient,
+) -> None:
     body = json.dumps({"object": "instagram", "entry": []}).encode("utf-8")
 
-    response = client.post(
+    response = await client.post(
         "/webhook", content=body, headers={"X-Hub-Signature-256": "sha256=" + "0" * 64}
     )
     assert response.status_code == 403
 
 
-def test_receive_webhook_with_missing_signature_returns_403(client: TestClient) -> None:
+async def test_receive_webhook_with_missing_signature_returns_403(
+    client: httpx.AsyncClient,
+) -> None:
     body = json.dumps({"object": "instagram", "entry": []}).encode("utf-8")
 
-    response = client.post("/webhook", content=body)
+    response = await client.post("/webhook", content=body)
     assert response.status_code == 403
 
 
-# --- Echo filtering ---
+# --- tenant resolution + echo filtering ---
 
 
 def _messaging_payload(
-    sender_id: str, recipient_id: str, text: str, is_echo: bool = False
+    page_id: str, sender_id: str, recipient_id: str, text: str, is_echo: bool = False
 ) -> bytes:
     payload = {
         "object": "instagram",
         "entry": [
             {
-                "id": "page-1",
+                "id": page_id,
                 "messaging": [
                     {
                         "sender": {"id": sender_id},
@@ -127,42 +152,100 @@ def _messaging_payload(
     return json.dumps(payload).encode("utf-8")
 
 
-def test_receive_webhook_skips_echo_event(
-    client: TestClient, caplog: pytest.LogCaptureFixture
+async def test_receive_webhook_skips_echo_event(
+    client: httpx.AsyncClient,
+    seed: Seed,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    body = _messaging_payload("page-1", "user-1", "We'll be right with you", is_echo=True)
+    page_id = seed.a.channel.external_id
+    body = _messaging_payload(page_id, page_id, "user-1", "We'll be right with you", is_echo=True)
     signature = _sign(body, "test-app-secret")
 
     with caplog.at_level(logging.INFO, logger="app.api.webhook"):
-        response = client.post("/webhook", content=body, headers={"X-Hub-Signature-256": signature})
+        response = await client.post(
+            "/webhook", content=body, headers={"X-Hub-Signature-256": signature}
+        )
 
     assert response.status_code == 200
     assert "webhook_echo_skipped" in caplog.text
     assert "webhook_message_received" not in caplog.text
 
 
-def test_receive_webhook_skips_event_from_own_account_without_echo_flag(
-    client: TestClient, caplog: pytest.LogCaptureFixture
+async def test_receive_webhook_skips_event_from_own_account_without_echo_flag(
+    client: httpx.AsyncClient,
+    seed: Seed,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    body = _messaging_payload("page-1", "user-1", "Auto message", is_echo=False)
+    page_id = seed.a.channel.external_id
+    body = _messaging_payload(page_id, page_id, "user-1", "Auto message", is_echo=False)
     signature = _sign(body, "test-app-secret")
 
     with caplog.at_level(logging.INFO, logger="app.api.webhook"):
-        response = client.post("/webhook", content=body, headers={"X-Hub-Signature-256": signature})
+        response = await client.post(
+            "/webhook", content=body, headers={"X-Hub-Signature-256": signature}
+        )
 
     assert response.status_code == 200
     assert "webhook_echo_skipped" in caplog.text
 
 
-def test_receive_webhook_processes_genuine_inbound_message(
-    client: TestClient, caplog: pytest.LogCaptureFixture
+async def test_receive_webhook_processes_genuine_inbound_message(
+    client: httpx.AsyncClient,
+    seed: Seed,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    body = _messaging_payload("user-1", "page-1", "Hi, do you have an opening tomorrow?")
+    page_id = seed.a.channel.external_id
+    body = _messaging_payload(page_id, "user-1", page_id, "Hi, do you have an opening tomorrow?")
     signature = _sign(body, "test-app-secret")
 
     with caplog.at_level(logging.INFO, logger="app.api.webhook"):
-        response = client.post("/webhook", content=body, headers={"X-Hub-Signature-256": signature})
+        response = await client.post(
+            "/webhook", content=body, headers={"X-Hub-Signature-256": signature}
+        )
 
     assert response.status_code == 200
     assert "webhook_message_received" in caplog.text
     assert "webhook_echo_skipped" not in caplog.text
+    # extra={...} fields land on the LogRecord, not in caplog.text (which is
+    # just the rendered message), so check the record directly.
+    [record] = [r for r in caplog.records if r.message == "webhook_message_received"]
+    assert record.tenant_id == str(seed.tenant_a.id)  # type: ignore[attr-defined]
+
+
+async def test_receive_webhook_from_unknown_ig_account_is_skipped_and_logged(
+    client: httpx.AsyncClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    body = _messaging_payload(
+        "no-such-page", "user-1", "no-such-page", "Hi, do you have an opening tomorrow?"
+    )
+    signature = _sign(body, "test-app-secret")
+
+    with caplog.at_level(logging.INFO, logger="app.api.webhook"):
+        response = await client.post(
+            "/webhook", content=body, headers={"X-Hub-Signature-256": signature}
+        )
+
+    assert response.status_code == 200
+    assert "webhook_unknown_ig_account" in caplog.text
+    assert "webhook_message_received" not in caplog.text
+
+
+async def test_receive_webhook_tenant_b_account_resolves_to_tenant_b_not_a(
+    client: httpx.AsyncClient,
+    seed: Seed,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    page_id = seed.b.channel.external_id
+    body = _messaging_payload(page_id, "user-1", page_id, "What are your hours?")
+    signature = _sign(body, "test-app-secret")
+
+    with caplog.at_level(logging.INFO, logger="app.api.webhook"):
+        response = await client.post(
+            "/webhook", content=body, headers={"X-Hub-Signature-256": signature}
+        )
+
+    assert response.status_code == 200
+    [record] = [r for r in caplog.records if r.message == "webhook_message_received"]
+    assert record.tenant_id == str(seed.tenant_b.id)  # type: ignore[attr-defined]
+    assert record.tenant_id != str(seed.tenant_a.id)  # type: ignore[attr-defined]

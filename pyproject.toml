@@ -59,4 +59,5 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 
 [tool.coverage.run]
-omit = ["app/core/config.py"]
+omit = ["app/core/config.py", "app/core/db.py"]
+concurrency = ["greenlet", "thread"]
