@@ -13,7 +13,7 @@ services:
 
   worker:
     build: .
-    command: ["sh", "-c", "echo 'ARQ worker not implemented yet' && sleep infinity"]
+    command: ["arq", "app.workers.tasks.WorkerSettings"]
     env_file:
       - .env.docker
     depends_on:

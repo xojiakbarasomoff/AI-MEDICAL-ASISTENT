@@ -2,14 +2,18 @@ import hashlib
 import hmac
 import logging
 
+from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.core.db import get_db_session
+from app.core.queue import get_arq_pool
+from app.core.redaction import preview
 from app.core.tenant_context import reset_current_tenant, set_current_tenant
 from app.services.tenant_resolution import resolve_tenant_for_ig_account
+from app.workers.tasks import process_inbound_message
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +63,7 @@ def _is_echo(event: MessagingEvent, page_id: str) -> bool:
     return event.sender.id == page_id
 
 
-async def _handle_payload(session: AsyncSession, payload: WebhookPayload) -> None:
+async def _handle_payload(session: AsyncSession, pool: ArqRedis, payload: WebhookPayload) -> None:
     for entry in payload.entry:
         # entry.id is the IG account (page) id that received the message —
         # one tenant's channel per entry, so resolution happens once per
@@ -83,18 +87,43 @@ async def _handle_payload(session: AsyncSession, payload: WebhookPayload) -> Non
                     )
                     continue
 
+                if event.message.text is None:
+                    # Attachment-only message (image, sticker, etc) — nothing
+                    # for the FAQ/LLM pipeline to answer yet.
+                    logger.info(
+                        "webhook_attachment_only_skipped",
+                        extra={"sender_id": event.sender.id, "recipient_id": event.recipient.id},
+                    )
+                    continue
+
+                # Full message text stays out of INFO — it's patient content
+                # that shouldn't sit in logs that may ship to external
+                # monitoring (TZ section 7, personal data). Length + a short
+                # truncated preview only.
                 logger.info(
                     "webhook_message_received",
                     extra={
                         "tenant_id": str(tenant_id),
                         "sender_igsid": event.sender.id,
                         "recipient_id": event.recipient.id,
-                        "message_text": event.message.text,
+                        "message_length": len(event.message.text),
+                        "message_preview": preview(event.message.text),
                     },
                 )
 
-                # TODO(IGB-?): enqueue the message onto Redis/ARQ for async processing
-                # TODO(IGB-?): call the RAG/LLM pipeline to generate and send a reply
+                # TODO(IGB-?): Meta can redeliver the same webhook payload
+                # (slow ack, transient error, etc), which would enqueue and
+                # reply to the same message twice. No dedup yet — needs an
+                # idempotency key (the IG message id) checked before
+                # enqueueing. arq's enqueue_job(_job_id=...) can provide this
+                # for free (it no-ops if a job with that id is already
+                # queued/running) if the IG message id is used as _job_id.
+                await pool.enqueue_job(
+                    process_inbound_message.__name__,
+                    str(tenant_id),
+                    event.sender.id,
+                    event.message.text,
+                )
         finally:
             reset_current_tenant(token)
 
@@ -116,6 +145,7 @@ async def receive_webhook(
     request: Request,
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_db_session),
+    pool: ArqRedis = Depends(get_arq_pool),
 ) -> Response:
     raw_body = await request.body()
     signature_header = request.headers.get("x-hub-signature-256")
@@ -130,6 +160,6 @@ async def receive_webhook(
         logger.warning("webhook_payload_invalid")
         return Response(status_code=status.HTTP_200_OK)
 
-    await _handle_payload(session, payload)
+    await _handle_payload(session, pool, payload)
 
     return Response(status_code=status.HTTP_200_OK)

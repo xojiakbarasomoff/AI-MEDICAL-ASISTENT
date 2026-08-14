@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from functools import lru_cache
 
 from sqlalchemy.ext.asyncio import (
@@ -21,6 +22,17 @@ def _get_sessionmaker() -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(get_engine(), expire_on_commit=False)
 
 
+@asynccontextmanager
+async def db_session() -> AsyncIterator[AsyncSession]:
+    """One AsyncSession, closed on exit. The shared primitive behind both
+    get_db_session (the FastAPI dependency, for request handlers) and direct
+    use from non-request code like ARQ job functions, which have no
+    dependency injection to lean on and must open their own session.
+    """
+    async with _get_sessionmaker()() as session:
+        yield session
+
+
 async def get_db_session() -> AsyncIterator[AsyncSession]:
     """FastAPI dependency: one AsyncSession per request, closed afterward.
 
@@ -28,5 +40,5 @@ async def get_db_session() -> AsyncIterator[AsyncSession]:
     (app.dependency_overrides[get_db_session] = ...) to hand back a
     transactional, rolled-back session instead of hitting the real engine.
     """
-    async with _get_sessionmaker()() as session:
+    async with db_session() as session:
         yield session
