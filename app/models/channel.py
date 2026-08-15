@@ -26,5 +26,13 @@ class Channel(Base):
     # namespaces, so two channels of different types could coincidentally
     # share an id string.
     external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Always ciphertext at rest, never plaintext — encrypted with
+    # app.core.encryption.encrypt (Fernet, keyed by ENCRYPTION_KEY) before
+    # insert, decrypted with app.core.encryption.decrypt at the one place
+    # that needs the real value (app.workers.tasks._send_reply). This
+    # includes the "no real token yet" placeholder sentinels (see
+    # app.services.instagram_client.is_placeholder_credential) — nothing
+    # ever goes into this column unencrypted, so there's no plaintext
+    # special case to accidentally leave unprotected.
     credentials: Mapped[str] = mapped_column(Text, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))

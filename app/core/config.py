@@ -1,6 +1,7 @@
 from functools import lru_cache
 from typing import Literal, Self
 
+from cryptography.fernet import Fernet
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -17,6 +18,13 @@ class Settings(BaseSettings):
     redis_url: str = Field(alias="REDIS_URL")
     webhook_verify_token: str = Field(alias="WEBHOOK_VERIFY_TOKEN")
     meta_app_secret: str = Field(alias="META_APP_SECRET")
+    # Symmetric key for app.core.encryption (channel.credentials at rest —
+    # access tokens, not just placeholders, live there). Required, not
+    # optional-with-a-plaintext-fallback: a missing or malformed key must
+    # fail app startup loudly rather than let a secret get written in
+    # plaintext by accident. Generate with
+    # `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+    encryption_key: str = Field(alias="ENCRYPTION_KEY")
     # TODO(IGB-?): move onto Tenant/per-tenant settings once the admin panel
     # (TZ 4.2) exists, so each clinic can tune its own debounce window
     # instead of every tenant sharing this one value — same pattern as
@@ -39,6 +47,21 @@ class Settings(BaseSettings):
             raise ValueError("OPENAI_API_KEY is required when MODEL_PROVIDER=openai")
         if self.model_provider == "gemini" and self.gemini_api_key is None:
             raise ValueError("GEMINI_API_KEY is required when MODEL_PROVIDER=gemini")
+        return self
+
+    @model_validator(mode="after")
+    def _require_valid_encryption_key(self) -> Self:
+        # Fernet() itself validates: url-safe-base64-decodable and exactly 32
+        # bytes once decoded. Both failure modes raise ValueError (binascii's
+        # decode error is a ValueError subclass) — re-raised with a message
+        # that says what to do about it, not just that construction failed.
+        try:
+            Fernet(self.encryption_key.encode("utf-8"))
+        except ValueError as exc:
+            raise ValueError(
+                "ENCRYPTION_KEY must be a valid Fernet key (32 url-safe "
+                "base64-encoded bytes) — generate one with Fernet.generate_key()"
+            ) from exc
         return self
 
 

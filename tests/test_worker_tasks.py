@@ -8,6 +8,7 @@ import pytest
 from arq.connections import ArqRedis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.encryption import DecryptionError, encrypt
 from app.rag.embeddings import EMBEDDING_DIMENSIONS, EmbeddingProvider
 from app.rag.llm import ChatMessage, LLMProvider
 from app.repositories.channel import ChannelRepository
@@ -295,13 +296,16 @@ async def test_process_inbound_message_without_configured_token_skips_send_and_l
     llm_provider = FakeLLMProvider(reply="should never be sent")
     instagram_client = FakeInstagramClient()
 
-    # A fresh tenant with a channel whose credentials are still the seed
-    # placeholder — the real Instagram token is blocked as of writing (see
-    # app.services.instagram_client.is_placeholder_credential).
+    # A fresh tenant with a channel whose credentials are still the
+    # placeholder sentinel — the real Instagram token is blocked as of
+    # writing (see app.services.instagram_client.is_placeholder_credential).
+    # Encrypted like any real row (see app.core.encryption): the placeholder
+    # gets decrypted back to "" before the placeholder check runs, same as
+    # a real token would.
     tenant = await TenantRepository(db_session).create(name="Clinic Unconfigured", status="active")
     with as_tenant(tenant.id):
         channel = await ChannelRepository(db_session).create(
-            type="instagram", credentials="", external_id=f"ig-{tenant.id}"
+            type="instagram", credentials=encrypt(""), external_id=f"ig-{tenant.id}"
         )
 
     with caplog.at_level(logging.INFO, logger="app.workers.tasks"):
@@ -321,6 +325,38 @@ async def test_process_inbound_message_without_configured_token_skips_send_and_l
     assert skip_record.sender_igsid == "sender-1"  # type: ignore[attr-defined]
     assert skip_record.channel_id == str(channel.id)  # type: ignore[attr-defined]
     assert skip_record.levelname == "WARNING"
+
+
+async def test_process_inbound_message_undecryptable_credentials_raises_not_skips(
+    db_session: AsyncSession,
+    as_tenant: Callable[[UUID], AbstractContextManager[None]],
+) -> None:
+    """A corrupted row or a wrong/rotated ENCRYPTION_KEY must fail the job
+    loudly (DecryptionError propagates), not get treated as "no token yet"
+    and silently skipped — those are different problems and must not look
+    the same in logs/alerts.
+    """
+    instagram_client = FakeInstagramClient()
+
+    tenant = await TenantRepository(db_session).create(name="Clinic Corrupted", status="active")
+    with as_tenant(tenant.id):
+        await ChannelRepository(db_session).create(
+            type="instagram",
+            credentials="not-valid-ciphertext",
+            external_id=f"ig-{tenant.id}",
+        )
+
+    with pytest.raises(DecryptionError):
+        await process_inbound_message(
+            {},
+            str(tenant.id),
+            "sender-1",
+            "chest pain",  # emergency keyword — skips retrieval/LLM entirely
+            session_factory=_session_factory(db_session),
+            instagram_client=instagram_client,
+        )
+
+    assert instagram_client.calls == []
 
 
 # --- Instagram send: emergency replies are sent too ---

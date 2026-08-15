@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.db import db_session
+from app.core.encryption import decrypt
 from app.core.redaction import preview
 from app.core.tenant_context import reset_current_tenant, set_current_tenant
 from app.rag.embeddings import EmbeddingProvider
@@ -43,7 +44,10 @@ async def _send_reply(
     is_placeholder_credential) and being outside Meta's 24-hour messaging
     window. Both are expected, recoverable states, not bugs — the pipeline
     should keep working end-to-end today and start actually sending the
-    moment a real token lands, not crash the job in the meantime.
+    moment a real token lands, not crash the job in the meantime. A
+    DecryptionError (wrong/rotated ENCRYPTION_KEY, corrupted row) is NOT
+    treated as one of those two — that's a real misconfiguration, not "no
+    token yet", so it's left to propagate and fail the job loudly.
     """
     channels = await ChannelRepository(session).list(type="instagram", is_active=True)
     channel = next(iter(channels), None)
@@ -51,7 +55,12 @@ async def _send_reply(
         logger.warning("instagram_send_skipped_no_channel", extra={"sender_igsid": sender_igsid})
         return
 
-    if is_placeholder_credential(channel.credentials):
+    # channel.credentials is always ciphertext at rest (app.core.encryption)
+    # — even the "pending" placeholder is stored encrypted, so there's no
+    # special-cased plaintext path to accidentally leave un-encrypted.
+    access_token = decrypt(channel.credentials)
+
+    if is_placeholder_credential(access_token):
         logger.warning(
             "no_token_configured",
             extra={"sender_igsid": sender_igsid, "channel_id": str(channel.id)},
@@ -77,7 +86,7 @@ async def _send_reply(
     # the client already logs status/error code before raising, and letting
     # the job fail lets arq retry, same as an LLM call failing above.
     await instagram_client.send_text(
-        access_token=channel.credentials, recipient_igsid=sender_igsid, text=reply
+        access_token=access_token, recipient_igsid=sender_igsid, text=reply
     )
     logger.info(
         "instagram_reply_sent",

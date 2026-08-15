@@ -43,6 +43,7 @@ jobs:
       OPENAI_API_KEY: sk-test-placeholder
       WEBHOOK_VERIFY_TOKEN: ci-test-verify-token
       META_APP_SECRET: ci-test-app-secret
+      ENCRYPTION_KEY: Hq3_REB-V0twf7iBgCPCSUZQiG44egxyiZg9kOKRxUg=
 
     steps:
       - name: Checkout

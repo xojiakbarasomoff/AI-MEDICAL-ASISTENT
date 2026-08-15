@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
+from app.core.encryption import encrypt
 from app.core.tenant_context import reset_current_tenant, set_current_tenant
 from app.models.appointment import Appointment
 from app.models.channel import Channel
@@ -119,8 +120,16 @@ async def seed(
 
     async def _build(tenant: Tenant) -> TenantSeed:
         with as_tenant(tenant.id):
+            # Stored encrypted, like every real channel row (see
+            # app.core.encryption, app.models.channel.Channel.credentials) —
+            # app.workers.tasks._send_reply decrypts unconditionally, so a
+            # plaintext seed value here would make every worker test that
+            # sends a reply fail with DecryptionError instead of testing
+            # what it's meant to test. Plaintext value stays "token" so
+            # existing assertions on the decrypted value don't need to
+            # change.
             channel = await ChannelRepository(db_session).create(
-                type="instagram", credentials="token", external_id=f"ig-{tenant.id}"
+                type="instagram", credentials=encrypt("token"), external_id=f"ig-{tenant.id}"
             )
             user = await UserRepository(db_session).create(
                 channel_id=channel.id, external_id=f"ext-{tenant.id}"
