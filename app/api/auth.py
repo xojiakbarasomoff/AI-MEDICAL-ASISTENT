@@ -1,12 +1,15 @@
 import secrets
 from collections.abc import AsyncIterator
 
+from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings, get_settings
 from app.core.db import get_db_session
+from app.core.queue import get_arq_pool
 from app.core.session import (
     SESSION_COOKIE_NAME,
     SESSION_MAX_AGE_SECONDS,
@@ -17,6 +20,11 @@ from app.core.session import (
 from app.core.tenant_context import reset_current_tenant, set_current_tenant
 from app.models.operator import Operator
 from app.services.auth import authenticate_operator
+from app.services.login_rate_limit import (
+    is_login_rate_limited,
+    record_failed_login,
+    reset_login_attempts,
+)
 
 templates = Jinja2Templates(directory="app/templates")
 
@@ -94,9 +102,22 @@ async def login_submit(
     username: str = Form(...),
     password: str = Form(...),
     db_session: AsyncSession = Depends(get_db_session),
+    pool: ArqRedis = Depends(get_arq_pool),
+    settings: Settings = Depends(get_settings),
 ) -> HTMLResponse | RedirectResponse:
+    if await is_login_rate_limited(pool, username):
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"error": "Too many failed attempts. Try again in a few minutes."},
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+
     operator = await authenticate_operator(db_session, username, password)
     if operator is None:
+        # Recorded against the submitted username even if it doesn't exist —
+        # see login_rate_limit's module docstring for why that's deliberate.
+        await record_failed_login(pool, username)
         return templates.TemplateResponse(
             request,
             "login.html",
@@ -104,6 +125,7 @@ async def login_submit(
             status_code=status.HTTP_401_UNAUTHORIZED,
         )
 
+    await reset_login_attempts(pool, username)
     cookie_value, _csrf_token = create_session_cookie(operator.id)
     response = RedirectResponse(
         url="/dashboard/appointments", status_code=status.HTTP_303_SEE_OTHER
@@ -113,13 +135,7 @@ async def login_submit(
         cookie_value,
         max_age=SESSION_MAX_AGE_SECONDS,
         httponly=True,
-        # Derived from the actual request, not hardcoded True: a hardcoded
-        # Secure flag would make the cookie invisible over plain HTTP,
-        # breaking local dev (http://localhost:8000) entirely. In
-        # production behind a TLS-terminating proxy, run uvicorn with
-        # --proxy-headers so request.url.scheme reflects the original
-        # client scheme (https), not the proxy's internal http hop.
-        secure=request.url.scheme == "https",
+        secure=settings.session_cookie_secure,
         samesite="lax",
     )
     return response

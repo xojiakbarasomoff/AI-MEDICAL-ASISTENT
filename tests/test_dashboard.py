@@ -6,16 +6,19 @@ from uuid import UUID
 
 import httpx
 import pytest
+from arq.connections import ArqRedis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.core.db import get_db_session
 from app.core.passwords import hash_password
+from app.core.queue import get_arq_pool
 from app.main import app
 from app.models.operator import Operator
 from app.repositories.appointment import AppointmentRepository
 from app.repositories.operator import OperatorRepository
 from app.services.appointment import create_appointment
+from app.services.login_rate_limit import MAX_LOGIN_ATTEMPTS
 from tests.conftest import Seed
 
 TEST_SETTINGS = Settings(
@@ -41,20 +44,28 @@ def _override_settings() -> Iterator[None]:
 
 
 @pytest.fixture
-async def client(db_session: AsyncSession) -> AsyncIterator[httpx.AsyncClient]:
+async def client(
+    db_session: AsyncSession, redis_pool: ArqRedis
+) -> AsyncIterator[httpx.AsyncClient]:
     """Same in-process ASGI pattern as tests/test_webhook.py's client fixture
     — shares this test's event loop (and so its db_session), unlike
-    fastapi.testclient.TestClient.
+    fastapi.testclient.TestClient. Needs the real redis_pool now too: login
+    rate-limiting does real INCR/EXPIRE/GET/DELETE against Redis.
     """
 
     async def _get_db_session_override() -> AsyncSession:
         return db_session
 
+    async def _get_arq_pool_override() -> ArqRedis:
+        return redis_pool
+
     app.dependency_overrides[get_db_session] = _get_db_session_override
+    app.dependency_overrides[get_arq_pool] = _get_arq_pool_override
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as ac:
         yield ac
     app.dependency_overrides.pop(get_db_session, None)
+    app.dependency_overrides.pop(get_arq_pool, None)
 
 
 async def _create_operator(
@@ -138,6 +149,66 @@ async def test_login_success_sets_cookie_and_redirects(
     assert response.status_code == 303
     assert response.headers["location"] == "/dashboard/appointments"
     assert "session" in response.cookies
+
+
+# --- login rate limiting ---
+
+
+async def test_login_rate_limits_after_repeated_failures(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+    seed: Seed,
+    as_tenant: Callable[[UUID], AbstractContextManager[None]],
+) -> None:
+    await _create_operator(
+        db_session,
+        as_tenant,
+        seed.tenant_a.id,
+        username="op-throttled",
+        password="right-password",
+        role="operator",
+    )
+
+    for _ in range(MAX_LOGIN_ATTEMPTS):
+        response = await _login(client, "op-throttled", "wrong-password")
+        assert response.status_code == 401
+
+    # Locked out now even with the correct password — rate limiting has to
+    # block the attempt itself, not just count failures after the fact.
+    response = await _login(client, "op-throttled", "right-password")
+    assert response.status_code == 429
+    assert "session" not in response.cookies
+
+
+async def test_login_rate_limit_is_per_username(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+    seed: Seed,
+    as_tenant: Callable[[UUID], AbstractContextManager[None]],
+) -> None:
+    await _create_operator(
+        db_session,
+        as_tenant,
+        seed.tenant_a.id,
+        username="op-throttled-a",
+        password="pw-a",
+        role="operator",
+    )
+    await _create_operator(
+        db_session,
+        as_tenant,
+        seed.tenant_a.id,
+        username="op-throttled-b",
+        password="pw-b",
+        role="operator",
+    )
+
+    for _ in range(MAX_LOGIN_ATTEMPTS):
+        await _login(client, "op-throttled-a", "wrong")
+
+    # A different account's own attempts are unaffected by op-throttled-a's lockout.
+    response = await _login(client, "op-throttled-b", "pw-b")
+    assert response.status_code == 303
 
 
 # --- access control ---

@@ -149,6 +149,29 @@ async def test_receive_webhook_with_missing_signature_returns_403(
     assert response.status_code == 403
 
 
+async def test_receive_webhook_succeeds_with_no_session_cookie_and_no_csrf_token(
+    client: httpx.AsyncClient,
+) -> None:
+    """The dashboard's session/CSRF layer (app.api.auth) must never reach
+    the webhook — Meta calls this endpoint with no session cookie and no
+    CSRF token, authenticating solely via X-Hub-Signature-256. Nothing here
+    sends a cookie or a csrf_token field; a signed request must still
+    succeed exactly as it did before that layer existed, proving isolation
+    isn't just "no test caught a regression" but an explicit, permanent
+    guarantee.
+    """
+    assert "session" not in client.cookies
+    body = json.dumps({"object": "instagram", "entry": []}).encode("utf-8")
+    signature = _sign(body, "test-app-secret")
+
+    response = await client.post(
+        "/webhook", content=body, headers={"X-Hub-Signature-256": signature}
+    )
+
+    assert response.status_code == 200
+    assert "session" not in response.cookies
+
+
 # --- tenant resolution + echo filtering + debounce registration ---
 
 

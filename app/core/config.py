@@ -31,6 +31,16 @@ class Settings(BaseSettings):
     # rotating one shouldn't force rotating the other. Generate with
     # `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
     session_secret_key: str = Field(alias="SESSION_SECRET_KEY")
+    # False by default so login works over plain http://localhost in local
+    # dev — a hardcoded Secure flag would make the browser silently refuse
+    # to store the cookie there. Set true explicitly in production (which
+    # must be behind HTTPS), rather than inferring it from the request's
+    # scheme: inference only works if the deployment correctly forwards
+    # X-Forwarded-Proto and uvicorn is run with --proxy-headers, and a
+    # misconfiguration there would silently downgrade to an insecure cookie.
+    # A config flag fails safe — wrong by default (False, i.e. explicit
+    # opt-in) rather than wrong by a proxy-setup mistake.
+    session_cookie_secure: bool = Field(default=False, alias="SESSION_COOKIE_SECURE")
     # TODO(IGB-?): move onto Tenant/per-tenant settings once the admin panel
     # (TZ 4.2) exists, so each clinic can tune its own debounce window
     # instead of every tenant sharing this one value — same pattern as
