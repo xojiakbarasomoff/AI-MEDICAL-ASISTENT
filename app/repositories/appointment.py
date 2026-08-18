@@ -36,6 +36,24 @@ class AppointmentRepository(TenantScopedRepository[Appointment]):
         result = await self.session.execute(stmt)
         return result.scalars().all()
 
+    async def list_between(self, start: datetime, end: datetime) -> Sequence[Appointment]:
+        """Every booking in [start, end) regardless of status, sorted by
+        scheduled_at — the dashboard's day view, which (unlike
+        list_active_between) needs to show cancelled bookings too, not just
+        active ones.
+        """
+        stmt = (
+            select(Appointment)
+            .where(
+                Appointment.tenant_id == get_current_tenant(),
+                Appointment.scheduled_at >= start,
+                Appointment.scheduled_at < end,
+            )
+            .order_by(Appointment.scheduled_at)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalars().all()
+
     async def update(self, obj: Appointment, **values: Any) -> Appointment:
         """Mutates and flushes an already-loaded row (e.g. cancelling).
 

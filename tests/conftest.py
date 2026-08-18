@@ -11,6 +11,7 @@ from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
 from app.core.encryption import encrypt
+from app.core.passwords import hash_password
 from app.core.tenant_context import reset_current_tenant, set_current_tenant
 from app.models.appointment import Appointment
 from app.models.channel import Channel
@@ -37,11 +38,20 @@ async def db_session() -> AsyncIterator[AsyncSession]:
     flush/commit) that's always rolled back afterward, so tests never leave
     data behind and never see another test's writes. Requires the Dockerized
     Postgres from docker-compose.yml to be reachable at DATABASE_URL.
+
+    expire_on_commit=False matches app.core.db's real sessionmaker: without
+    it, a route that calls session.commit() (e.g. the dashboard's
+    create/cancel endpoints) would expire every ORM object already loaded in
+    this shared test session — including the `seed` fixture's rows — and
+    the next plain attribute access on one of them would need an implicit
+    reload that isn't safe outside an awaited call.
     """
     engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
     async with engine.connect() as connection:
         trans = await connection.begin()
-        session = AsyncSession(bind=connection, join_transaction_mode="create_savepoint")
+        session = AsyncSession(
+            bind=connection, join_transaction_mode="create_savepoint", expire_on_commit=False
+        )
         try:
             yield session
         finally:
@@ -143,7 +153,10 @@ async def seed(
                 embedding=[0.0] * EMBEDDING_DIMENSIONS,
             )
             operator = await OperatorRepository(db_session).create(
-                name="Dr. Smith", role="dentist", credentials="secret"
+                name="Dr. Smith",
+                role="doctor",
+                username=f"dr.smith-{tenant.id}",
+                password_hash=hash_password("seed-password"),
             )
             appointment = await AppointmentRepository(db_session).create(
                 user_id=user.id,

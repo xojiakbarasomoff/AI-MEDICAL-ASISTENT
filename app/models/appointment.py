@@ -34,16 +34,22 @@ class Appointment(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True
     )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
+    # Nullable: an operator booking a walk-in/phone patient who has never
+    # messaged the clinic has no User row to attach (User requires a
+    # channel_id) — patient_name is that booking's identity instead. A bot
+    # booking always has both a user_id and a conversation_id.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True
     )
     conversation_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=True, index=True
     )
     doctor: Mapped[str] = mapped_column(String(255), nullable=False)
     # The name to book under — may differ from user.name (the IG account
-    # holder may be booking for a spouse/child). Falls back to user.name in
-    # the service layer when omitted.
+    # holder may be booking for a spouse/child), and is the only patient
+    # identity at all when user_id is None. See
+    # app.services.appointment.create_appointment for the "one of user_id /
+    # patient_name is required" rule.
     patient_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(String(50), nullable=False)

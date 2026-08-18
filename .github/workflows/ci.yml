@@ -44,6 +44,7 @@ jobs:
       WEBHOOK_VERIFY_TOKEN: ci-test-verify-token
       META_APP_SECRET: ci-test-app-secret
       ENCRYPTION_KEY: Hq3_REB-V0twf7iBgCPCSUZQiG44egxyiZg9kOKRxUg=
+      SESSION_SECRET_KEY: ci-test-session-secret-key-not-for-real-use
 
     steps:
       - name: Checkout

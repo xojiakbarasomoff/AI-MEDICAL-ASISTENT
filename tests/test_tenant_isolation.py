@@ -7,6 +7,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.passwords import hash_password
 from app.core.tenant_context import TenantContextError, get_current_tenant
 from app.models.message import Message
 from app.rag.embeddings import EMBEDDING_DIMENSIONS
@@ -46,7 +47,12 @@ def _new_knowledge_base_kwargs(seed: Seed) -> dict[str, Any]:
 
 
 def _new_operator_kwargs(seed: Seed) -> dict[str, Any]:
-    return {"name": "Dr. New", "role": "dentist", "credentials": "new-secret"}
+    return {
+        "name": "Dr. New",
+        "role": "doctor",
+        "username": "dr.new-unique",
+        "password_hash": hash_password("new-secret"),
+    }
 
 
 def _new_appointment_kwargs(seed: Seed) -> dict[str, Any]:

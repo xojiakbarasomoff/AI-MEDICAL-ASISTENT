@@ -51,6 +51,15 @@ class NoAvailabilityError(Exception):
         )
 
 
+class MissingPatientIdentityError(Exception):
+    """create_appointment() was given neither user_id nor patient_name — a
+    booking must be identifiable as *someone's* appointment.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("create_appointment requires at least one of user_id or patient_name")
+
+
 def _to_local(scheduled_at: datetime) -> datetime:
     return scheduled_at.astimezone(CLINIC_TIMEZONE)
 
@@ -151,14 +160,21 @@ async def find_next_free_slot(
 async def create_appointment(
     repo: AppointmentRepository,
     *,
-    user_id: uuid.UUID,
     scheduled_at: datetime,
     source: str,
+    user_id: uuid.UUID | None = None,
     conversation_id: uuid.UUID | None = None,
     patient_name: str | None = None,
     doctor: str = DEFAULT_DOCTOR_NAME,
 ) -> Appointment:
     """Books scheduled_at, refusing to double-book.
+
+    user_id is optional: a bot booking always has one (there's no
+    appointment without a prior IG conversation), but an operator booking a
+    walk-in or phone patient who's never messaged the clinic has no User row
+    to attach — patient_name is that booking's identity instead. At least
+    one of the two is required, checked here rather than left as a DB-level
+    surprise.
 
     The is_within_working_hours check up front just gives an obviously-wrong
     caller a clear error early. The actual double-booking guard is the
@@ -166,6 +182,8 @@ async def create_appointment(
     here as IntegrityError and is translated to SlotAlreadyBookedError so
     callers (bot/operator/dashboard) never see a raw DB error.
     """
+    if user_id is None and not patient_name:
+        raise MissingPatientIdentityError()
     if not is_within_working_hours(scheduled_at):
         raise OutsideWorkingHoursError(scheduled_at)
     try:

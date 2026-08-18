@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     # plaintext by accident. Generate with
     # `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
     encryption_key: str = Field(alias="ENCRYPTION_KEY")
+    # Signs the operator dashboard's session cookie (app.core.session) —
+    # separate from encryption_key since it protects a different thing
+    # (tamper-evidence on a cookie, not confidentiality of stored data) and
+    # rotating one shouldn't force rotating the other. Generate with
+    # `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+    session_secret_key: str = Field(alias="SESSION_SECRET_KEY")
     # TODO(IGB-?): move onto Tenant/per-tenant settings once the admin panel
     # (TZ 4.2) exists, so each clinic can tune its own debounce window
     # instead of every tenant sharing this one value — same pattern as

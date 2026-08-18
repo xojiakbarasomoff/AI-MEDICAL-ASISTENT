@@ -23,6 +23,16 @@ dependencies = [
     # python:3.12-slim base image ships one, so this must be an explicit
     # dependency rather than relying on the OS to provide it.
     "tzdata>=2024.1",
+    "jinja2>=3.1",
+    # Parses multipart/x-www-form-urlencoded request bodies — required by
+    # FastAPI's Form(...) params (the operator dashboard's login/booking
+    # forms), not pulled in automatically by fastapi itself.
+    "python-multipart>=0.0.12",
+    # Signs the operator session cookie (app.core.session) — payload is
+    # tamper-evident, not encrypted, so it carries only operator_id +
+    # csrf_token, never a secret.
+    "itsdangerous>=2.2",
+    "bcrypt>=4.2",
 ]
 
 [project.optional-dependencies]
@@ -50,7 +60,11 @@ target-version = "py312"
 select = ["E", "F", "I", "UP", "B", "SIM", "N"]
 
 [tool.ruff.lint.flake8-bugbear]
-extend-immutable-calls = ["fastapi.Depends"]
+# Depends was already here; Query/Form join it for the same reason — B008
+# only auto-exempts a default call when the parameter's own type annotation
+# is one of ruff's hardcoded immutable types, which doesn't include
+# datetime.date (see e.g. app.api.dashboard's `date`-typed Form params).
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Form"]
 
 [tool.black]
 line-length = 100
